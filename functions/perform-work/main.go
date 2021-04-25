@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"math/rand"
 	"time"
 
 	"github.com/aws/aws-lambda-go/lambda"
@@ -13,7 +14,8 @@ func main() {
 
 func handler(ctx context.Context) error {
 
-	time.Sleep(2 * time.Second)
+	seconds := rand.Intn(10-2) + 2
+	time.Sleep(time.Duration(seconds) * time.Second)
 
 	return nil
 }
