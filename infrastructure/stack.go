@@ -60,105 +60,90 @@ func NewConcurrencyControlStack(scope constructs.Construct, id string, props *Co
 		Retention:     awslogs.RetentionDays_ONE_DAY,
 	})
 
-	createLockEntry := awsstepfunctionstasks.NewDynamoPutItem(stack, jsii.String("createLockEntry"), &awsstepfunctionstasks.DynamoPutItemProps{
+	createLockStep := awsstepfunctionstasks.NewDynamoPutItem(stack, jsii.String("createLock"), &awsstepfunctionstasks.DynamoPutItemProps{
 		IntegrationPattern: awsstepfunctions.IntegrationPattern_RUN_JOB,
 		Item: &map[string]awsstepfunctionstasks.DynamoAttributeValue{
 			"lockName":  awsstepfunctionstasks.DynamoAttributeValue_FromString(jsii.String("concurrentLock")),
-			"execution": awsstepfunctionstasks.DynamoAttributeValue_FromString(awsstepfunctions.JsonPath_StringAt(jsii.String("$$.Execution.Id"))),
+			"lockCount": awsstepfunctionstasks.DynamoAttributeValue_FromNumber(jsii.Number(0)),
 		},
 		Table:               lockTable,
-		ConditionExpression: jsii.String("attribute_not_exists(#execution)"),
+		ConditionExpression: jsii.String("attribute_not_exists(#lockName)"),
 		ExpressionAttributeNames: &map[string]*string{
-			"#execution": jsii.String("execution"),
+			"#lockName": jsii.String("lockName"),
 		},
 	})
 
-	deleteLockEntry := awsstepfunctionstasks.NewDynamoDeleteItem(stack, jsii.String("deleteLockEntry"), &awsstepfunctionstasks.DynamoDeleteItemProps{
+	waitForLock := awsstepfunctions.NewWait(stack, jsii.String("waitForLock"), &awsstepfunctions.WaitProps{
+		Time: awsstepfunctions.WaitTime_Duration(awscdk.Duration_Seconds(jsii.Number(3))),
+	})
+
+	acquireLockStep := awsstepfunctionstasks.NewDynamoUpdateItem(stack, jsii.String("acquireLock"), &awsstepfunctionstasks.DynamoUpdateItemProps{
 		IntegrationPattern: awsstepfunctions.IntegrationPattern_RUN_JOB,
 		Key: &map[string]awsstepfunctionstasks.DynamoAttributeValue{
-			"lockName":  awsstepfunctionstasks.DynamoAttributeValue_FromString(jsii.String("concurrentLock")),
-			"execution": awsstepfunctionstasks.DynamoAttributeValue_FromString(awsstepfunctions.JsonPath_StringAt(jsii.String("$$.Execution.Id"))),
+			"lockName": awsstepfunctionstasks.DynamoAttributeValue_FromString(jsii.String("concurrentLock")),
 		},
 		Table:               lockTable,
-		ConditionExpression: jsii.String("attribute_exists(#execution)"),
+		ConditionExpression: jsii.String("#lockCount <> :lockLimit"),
 		ExpressionAttributeNames: &map[string]*string{
-			"#execution": jsii.String("execution"),
+			"#lockCount":  jsii.String("lockCount"),
+			"#lastHolder": jsii.String("lastHolder"),
+		},
+		ExpressionAttributeValues: &map[string]awsstepfunctionstasks.DynamoAttributeValue{
+			":inc":        awsstepfunctionstasks.DynamoAttributeValue_FromNumber(jsii.Number(1)),
+			":lockLimit":  awsstepfunctionstasks.DynamoAttributeValue_FromNumber(jsii.Number(5)),
+			":lastHolder": awsstepfunctionstasks.DynamoAttributeValue_FromString(awsstepfunctions.JsonPath_StringAt(jsii.String("$$.Execution.Id"))),
+		},
+		ReturnValues:     awsstepfunctionstasks.DynamoReturnValues_ALL_NEW,
+		UpdateExpression: jsii.String("SET #lockCount = #lockCount + :inc, #lastHolder = :lastHolder"),
+	}).AddRetry(&awsstepfunctions.RetryProps{
+		Errors: &[]*string{
+			jsii.String("DynamoDB.AmazonDynamoDBException"),
+		},
+		MaxAttempts: jsii.Number(0),
+	}).AddCatch(createLockStep, &awsstepfunctions.CatchProps{
+		Errors: &[]*string{
+			jsii.String("DynamoDB.AmazonDynamoDBException"),
+		},
+	}).AddCatch(waitForLock, &awsstepfunctions.CatchProps{
+		Errors: &[]*string{
+			jsii.String("DynamoDB.ConditionalCheckFailedException"),
 		},
 	})
 
-	checkLocks := awsstepfunctionstasks.NewDynamo()
+	waitForLock.Next(acquireLockStep)
 
-	// waitForLock := awsstepfunctions.NewWait(stack, jsii.String("waitForLock"), &awsstepfunctions.WaitProps{
-	// 	Time: awsstepfunctions.WaitTime_Duration(awscdk.Duration_Seconds(jsii.Number(3))),
-	// })
+	releaseLock := awsstepfunctionstasks.NewDynamoUpdateItem(stack, jsii.String("releaseLock"), &awsstepfunctionstasks.DynamoUpdateItemProps{
+		IntegrationPattern: awsstepfunctions.IntegrationPattern_RUN_JOB,
+		Key: &map[string]awsstepfunctionstasks.DynamoAttributeValue{
+			"lockName": awsstepfunctionstasks.DynamoAttributeValue_FromString(jsii.String("concurrentLock")),
+		},
+		Table:               lockTable,
+		ConditionExpression: jsii.String("attribute_exists(#lockName) AND #lockCount > :zero"),
+		ExpressionAttributeNames: &map[string]*string{
+			"#lockCount": jsii.String("lockCount"),
+			"#lockName":  jsii.String("lockName"),
+		},
+		ExpressionAttributeValues: &map[string]awsstepfunctionstasks.DynamoAttributeValue{
+			":zero": awsstepfunctionstasks.DynamoAttributeValue_FromNumber(jsii.Number(0)),
+			":dec":  awsstepfunctionstasks.DynamoAttributeValue_FromNumber(jsii.Number(-1)),
+		},
+		ReturnValues:     awsstepfunctionstasks.DynamoReturnValues_ALL_NEW,
+		UpdateExpression: jsii.String("SET #lockCount = #lockCount + :dec"),
+	})
 
-	// acquireLockStep := awsstepfunctionstasks.NewDynamoUpdateItem(stack, jsii.String("acquireLock"), &awsstepfunctionstasks.DynamoUpdateItemProps{
-	// 	IntegrationPattern: awsstepfunctions.IntegrationPattern_RUN_JOB,
-	// 	Key: &map[string]awsstepfunctionstasks.DynamoAttributeValue{
-	// 		"lockName": awsstepfunctionstasks.DynamoAttributeValue_FromString(jsii.String("concurrentLock")),
-	// 	},
-	// 	Table:               lockTable,
-	// 	ConditionExpression: jsii.String("#lockCount <> :lockLimit"),
-	// 	ExpressionAttributeNames: &map[string]*string{
-	// 		"#lockCount":  jsii.String("lockCount"),
-	// 		"#lastHolder": jsii.String("lastHolder"),
-	// 	},
-	// 	ExpressionAttributeValues: &map[string]awsstepfunctionstasks.DynamoAttributeValue{
-	// 		":inc":        awsstepfunctionstasks.DynamoAttributeValue_FromNumber(jsii.Number(1)),
-	// 		":lockLimit":  awsstepfunctionstasks.DynamoAttributeValue_FromNumber(jsii.Number(5)),
-	// 		":lastHolder": awsstepfunctionstasks.DynamoAttributeValue_FromString(awsstepfunctions.JsonPath_StringAt(jsii.String("$$.Execution.Id"))),
-	// 	},
-	// 	ReturnValues:     awsstepfunctionstasks.DynamoReturnValues_ALL_NEW,
-	// 	UpdateExpression: jsii.String("SET #lockCount = #lockCount + :inc, #lastHolder = :lastHolder"),
-	// }).AddRetry(&awsstepfunctions.RetryProps{
-	// 	Errors: &[]*string{
-	// 		jsii.String("DynamoDB.AmazonDynamoDBException"),
-	// 	},
-	// 	MaxAttempts: jsii.Number(0),
-	// }).AddCatch(createLockStep, &awsstepfunctions.CatchProps{
-	// 	Errors: &[]*string{
-	// 		jsii.String("DynamoDB.AmazonDynamoDBException"),
-	// 	},
-	// }).AddCatch(waitForLock, &awsstepfunctions.CatchProps{
-	// 	Errors: &[]*string{
-	// 		jsii.String("DynamoDB.ConditionalCheckFailedException"),
-	// 	},
-	// })
-
-	// waitForLock.Next(acquireLockStep)
-
-	// releaseLock := awsstepfunctionstasks.NewDynamoUpdateItem(stack, jsii.String("releaseLock"), &awsstepfunctionstasks.DynamoUpdateItemProps{
-	// 	IntegrationPattern: awsstepfunctions.IntegrationPattern_RUN_JOB,
-	// 	Key: &map[string]awsstepfunctionstasks.DynamoAttributeValue{
-	// 		"lockName": awsstepfunctionstasks.DynamoAttributeValue_FromString(jsii.String("concurrentLock")),
-	// 	},
-	// 	Table:               lockTable,
-	// 	ConditionExpression: jsii.String("attribute_exists(#lockName) AND #lockCount > :zero"),
-	// 	ExpressionAttributeNames: &map[string]*string{
-	// 		"#lockCount": jsii.String("lockCount"),
-	// 		"#lockName":  jsii.String("lockName"),
-	// 	},
-	// 	ExpressionAttributeValues: &map[string]awsstepfunctionstasks.DynamoAttributeValue{
-	// 		":zero": awsstepfunctionstasks.DynamoAttributeValue_FromNumber(jsii.Number(0)),
-	// 		":dec":  awsstepfunctionstasks.DynamoAttributeValue_FromNumber(jsii.Number(-1)),
-	// 	},
-	// 	ReturnValues:     awsstepfunctionstasks.DynamoReturnValues_ALL_NEW,
-	// 	UpdateExpression: jsii.String("SET #lockCount = #lockCount + :dec"),
-	// })
-
-	// createLockStep.AddCatch(acquireLockStep, &awsstepfunctions.CatchProps{
-	// 	Errors: &[]*string{
-	// 		jsii.String("States.ALL"),
-	// 	},
-	// 	ResultPath: nil,
-	// }).Next(acquireLockStep)
+	createLockStep.AddCatch(acquireLockStep, &awsstepfunctions.CatchProps{
+		Errors: &[]*string{
+			jsii.String("States.ALL"),
+		},
+		ResultPath: nil,
+	}).Next(acquireLockStep)
 
 	semaphoreMachine := awsstepfunctions.NewStateMachine(stack, jsii.String("semaphore"), &awsstepfunctions.StateMachineProps{
-		// Definition: acquireLockStep.Next(
-		// 	awsstepfunctionstasks.NewLambdaInvoke(stack, jsii.String("performWork"), &awsstepfunctionstasks.LambdaInvokeProps{
-		// 		IntegrationPattern: awsstepfunctions.IntegrationPattern_REQUEST_RESPONSE,
-		// 		LambdaFunction:     doWorkLambda,
-		// 	})).Next(releaseLock),
+		Definition: acquireLockStep.Next(
+			awsstepfunctionstasks.NewLambdaInvoke(stack, jsii.String("performWork"), &awsstepfunctionstasks.LambdaInvokeProps{
+				IntegrationPattern: awsstepfunctions.IntegrationPattern_REQUEST_RESPONSE,
+				LambdaFunction:     doWorkLambda,
+			})).Next(releaseLock),
 		StateMachineType: awsstepfunctions.StateMachineType_STANDARD,
 		TracingEnabled:   jsii.Bool(true),
 	})
